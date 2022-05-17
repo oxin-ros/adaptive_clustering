@@ -32,7 +32,7 @@
 #include <pcl/gpu/segmentation/gpu_extract_clusters.h>
 #include <pcl/gpu/segmentation/impl/gpu_extract_clusters.hpp>
 
-#define LOG
+//#define LOG
 
 ros::Publisher cluster_array_pub_;
 ros::Publisher cloud_filtered_pub_;
@@ -55,6 +55,7 @@ void pointCloudCallback(const sensor_msgs::PointCloud2::ConstPtr& ros_pc2_in) {
   /*** Convert ROS message to PCL ***/
   pcl::PointCloud<pcl::PointXYZI>::Ptr pcl_pc_in(new pcl::PointCloud<pcl::PointXYZI>);
   pcl::fromROSMsg(*ros_pc2_in, *pcl_pc_in);
+  //ROS_DEBUG_STREAM("CLOUD RETRIEVED, size: " << pcl_pc_in->size());
   
   /*** Remove ground and ceiling ***/
   std::vector<int> indices;
@@ -97,7 +98,7 @@ void pointCloudCallback(const sensor_msgs::PointCloud2::ConstPtr& ros_pc2_in) {
       octree_device->build();
       
       std::vector<pcl::PointIndices> cluster_indices_gpu;
-      pcl::gpu::EuclideanClusterExtraction<pcl::PointXYZ> gec;
+      pcl::gpu::EuclideanClusterExtraction gec;
       gec.setClusterTolerance(tolerance);
       gec.setMinClusterSize(cluster_size_min_);
       gec.setMaxClusterSize(cluster_size_max_);
@@ -234,12 +235,13 @@ int main(int argc, char **argv) {
   ROS_WARN("This is the GPU version of Adaptive Clustering.");
   pcl::gpu::printCudaDeviceInfo();
   
-  /*** Subscribers ***/
   ros::NodeHandle nh;
-  ros::Subscriber point_cloud_sub = nh.subscribe<sensor_msgs::PointCloud2>("velodyne_points", 1, pointCloudCallback);
+  ros::NodeHandle private_nh("~");
+  
+  /*** Subscribers ***/
+  ros::Subscriber point_cloud_sub = private_nh.subscribe<sensor_msgs::PointCloud2>("input", 1, pointCloudCallback);
 
   /*** Publishers ***/
-  ros::NodeHandle private_nh("~");
   cluster_array_pub_ = private_nh.advertise<adaptive_clustering_gpu::ClusterArray>("clusters", 100);
   cloud_filtered_pub_ = private_nh.advertise<sensor_msgs::PointCloud2>("cloud_filtered", 100);
   pose_array_pub_ = private_nh.advertise<geometry_msgs::PoseArray>("poses", 100);
