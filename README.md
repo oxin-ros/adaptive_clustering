@@ -18,7 +18,7 @@ $ catkin_make
 ```
 TITAN Xp
 CUDA 10.2
-PCL 1.12
+PCL 1.11
 Eigen 3.3.7
 ```
 

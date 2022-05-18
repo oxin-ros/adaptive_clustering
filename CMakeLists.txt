@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 2.8.3)
+cmake_minimum_required(VERSION 3.12)
 project(adaptive_clustering_gpu)
 
 find_package(PCL 1.11 REQUIRED)
@@ -28,9 +28,8 @@ generate_messages(DEPENDENCIES std_msgs sensor_msgs)
 
 catkin_package()
 
-message(${PCL_LIBRARIES})
-
-set(pcl_1_11_LBRARIES
+# TODO: replace with a regex for the shared object name (i.e. *.1.11).
+set(PCL_1_11_LIBRARIES
   pcl_common.so.1.11
   pcl_kdtree.so.1.11
   pcl_octree.so.1.11
@@ -129,7 +128,7 @@ set(pcl_1_11_LBRARIES
 
 
 add_executable(adaptive_clustering_gpu src/adaptive_clustering_gpu.cpp)
-target_link_libraries(adaptive_clustering_gpu ${catkin_LIBRARIES} ${Eigen3_LIBRARIES} ${pcl_1_11_LBRARIES})
+target_link_libraries(adaptive_clustering_gpu ${catkin_LIBRARIES} ${Eigen3_LIBRARIES} ${PCL_1_11_LIBRARIES})
 if(catkin_EXPORTED_TARGETS)
   add_dependencies(adaptive_clustering_gpu ${catkin_EXPORTED_TARGETS})
 endif()
