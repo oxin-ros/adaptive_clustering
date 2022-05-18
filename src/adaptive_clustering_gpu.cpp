@@ -48,8 +48,9 @@ int cluster_size_max_;
 const int region_max_ = 10; // Change this value to match how far you want to detect.
 int regions_[100];
 
-
-pcl::gpu::EuclideanClusterExtraction gpu_euclidian_cluster_extraction;
+pcl::gpu::Octree::PointCloud g_CloudDevice;
+pcl::gpu::Octree::Ptr g_OctreeDevice(new pcl::gpu::Octree);
+pcl::gpu::EuclideanClusterExtraction g_GpuClustering;
 
 visualization_msgs::Marker ToMarker(
     const pcl::PointCloud<pcl::PointXYZ>::Ptr& cluster,
@@ -96,6 +97,9 @@ visualization_msgs::Marker ToMarker(
         marker.points.push_back(point);
     }
     
+    // Default to the identity orientation.
+    marker.pose.orientation.w = 1.0;
+
     marker.scale.x = 0.02;
     marker.color.a = 1.0;
     marker.color.r = 0.0;
@@ -120,6 +124,11 @@ geometry_msgs::Pose ToPose(const pcl::PointCloud<pcl::PointXYZ>::Ptr& cluster)
     return pose;
 }
 
+float DistanceSquared(const pcl::PointXYZI& point)
+{
+    return (point.x * point.x) + (point.y * point.y) + (point.z * point.z);
+}
+
 
 int frames; clock_t start_time; bool reset = true;//fps
 void pointCloudCallback(const sensor_msgs::PointCloud2::ConstPtr& ros_pc2_in) 
@@ -136,17 +145,6 @@ void pointCloudCallback(const sensor_msgs::PointCloud2::ConstPtr& ros_pc2_in)
     pcl::PointCloud<pcl::PointXYZI>::Ptr pcl_pc_in(new pcl::PointCloud<pcl::PointXYZI>);
     pcl::fromROSMsg(*ros_pc2_in, *pcl_pc_in);
     
-//     /*** Remove ground and ceiling ***/
-//     std::vector<int> indices;
-//     for(int i = 0; i < pcl_pc_in->size(); ++i) 
-//     {
-//         if(pcl_pc_in->points[i].z >= z_axis_min_ && pcl_pc_in->points[i].z <= z_axis_max_) 
-//         {
-//             indices.push_back(i);
-//         }
-//     }
-//     pcl::copyPointCloud(*pcl_pc_in, indices, *pcl_pc_in);
-    
     /*** Divide the point cloud into nested circular regions ***/
     boost::array<std::vector<int>, region_max_> indices_array;
     for(int i = 0; i < pcl_pc_in->size(); i++) 
@@ -154,8 +152,8 @@ void pointCloudCallback(const sensor_msgs::PointCloud2::ConstPtr& ros_pc2_in)
         float range = 0.0;
         for(int region_index = 0; region_index < region_max_; region_index++) 
         {
-            float d2 = pcl_pc_in->points[i].x * pcl_pc_in->points[i].x + pcl_pc_in->points[i].y * pcl_pc_in->points[i].y + pcl_pc_in->points[i].z * pcl_pc_in->points[i].z;
-            if(d2 > range * range && d2 <= (range+regions_[region_index]) * (range+regions_[region_index])) 
+            const float distance_squared = DistanceSquared(pcl_pc_in->points[i]);
+            if(distance_squared > (range * range) && distance_squared <= (range + regions_[region_index]) * (range + regions_[region_index])) 
             {
                 indices_array[region_index].push_back(i);
                 break;
@@ -165,44 +163,53 @@ void pointCloudCallback(const sensor_msgs::PointCloud2::ConstPtr& ros_pc2_in)
     }
     
     float tolerance = 0.0;
-    std::vector<pcl::PointCloud<pcl::PointXYZ>::Ptr, Eigen::aligned_allocator<pcl::PointCloud<pcl::PointXYZ>::Ptr > > clusters;
+    std::vector<pcl::PointCloud<pcl::PointXYZ>::Ptr, Eigen::aligned_allocator<pcl::PointCloud<pcl::PointXYZ>::Ptr>> clusters;
     
     for(int region_index = 0; region_index < region_max_; region_index++) 
     {
         tolerance += 0.1;
         
-        if(indices_array[region_index].size() > cluster_size_min_) 
+        if(indices_array[region_index].size() < cluster_size_min_) 
         {
-            pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_filtered(new pcl::PointCloud<pcl::PointXYZ>);
-            pcl::copyPointCloud(*pcl_pc_in, indices_array[region_index], *cloud_filtered);
-            
-            pcl::gpu::Octree::PointCloud cloud_device;
-            cloud_device.upload(cloud_filtered->points);
-            
-            pcl::gpu::Octree::Ptr octree_device(new pcl::gpu::Octree);
-            octree_device->setCloud(cloud_device);
-            octree_device->build();
-            
-            std::vector<pcl::PointIndices> cluster_indices_gpu;
-            gpu_euclidian_cluster_extraction.setClusterTolerance(tolerance);
-            gpu_euclidian_cluster_extraction.setMinClusterSize(cluster_size_min_);
-            gpu_euclidian_cluster_extraction.setMaxClusterSize(cluster_size_max_);
-            gpu_euclidian_cluster_extraction.setSearchMethod(octree_device);
-            gpu_euclidian_cluster_extraction.setHostCloud(cloud_filtered);
-            gpu_euclidian_cluster_extraction.extract(cluster_indices_gpu);
-            
-            for(const pcl::PointIndices& cluster : cluster_indices_gpu) 
+            // Go to the next detection region.
+            continue;
+        }
+
+        // Copy the points from the detection region.
+        pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_filtered(new pcl::PointCloud<pcl::PointXYZ>);
+        pcl::copyPointCloud(*pcl_pc_in, indices_array[region_index], *cloud_filtered);
+        
+        // Upload the points to the GPU.
+        g_CloudDevice.upload(cloud_filtered->points);            
+        
+        // Build an Octree.
+        g_OctreeDevice->setCloud(g_CloudDevice);
+        g_OctreeDevice->build();
+        
+        // Find clusters in the detection region.
+        std::vector<pcl::PointIndices> cluster_indices_gpu;
+        g_GpuClustering.setClusterTolerance(tolerance);
+        g_GpuClustering.setMinClusterSize(cluster_size_min_);
+        g_GpuClustering.setMaxClusterSize(cluster_size_max_);
+        g_GpuClustering.setSearchMethod(g_OctreeDevice);
+        g_GpuClustering.setHostCloud(cloud_filtered);
+        g_GpuClustering.extract(cluster_indices_gpu);
+        
+        // Iterate over all the detected clusters.
+        for(const pcl::PointIndices& cluster : cluster_indices_gpu) 
+        {
+            // Copy the points from the GPU.
+            pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_cluster_gpu(new pcl::PointCloud<pcl::PointXYZ>);
+            for(const auto& index : (cluster.indices)) 
             {
-                pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_cluster_gpu(new pcl::PointCloud<pcl::PointXYZ>);
-                for(const auto& index : (cluster.indices)) 
-                {
-                    cloud_cluster_gpu->push_back((*cloud_filtered)[index]);
-                }
-                cloud_cluster_gpu->width = cloud_cluster_gpu->size();
-                cloud_cluster_gpu->height = 1;
-                cloud_cluster_gpu->is_dense = true;
-                clusters.push_back(cloud_cluster_gpu);
+                cloud_cluster_gpu->push_back((*cloud_filtered)[index]);
             }
+
+            // Add the cluster to the detected clusters.
+            cloud_cluster_gpu->width = cloud_cluster_gpu->size();
+            cloud_cluster_gpu->height = 1;
+            cloud_cluster_gpu->is_dense = true;
+            clusters.push_back(cloud_cluster_gpu);
         }
     }
 
@@ -222,7 +229,7 @@ void pointCloudCallback(const sensor_msgs::PointCloud2::ConstPtr& ros_pc2_in)
     {
         if(cluster_array_pub_.getNumSubscribers() > 0) 
         {
-            // add the cluster to the output.
+            // Add the cluster to the output.
             sensor_msgs::PointCloud2 ros_pc2_out;
             pcl::toROSMsg(*clusters[cluster_index], ros_pc2_out);
             cluster_array.clusters.push_back(ros_pc2_out);
@@ -230,12 +237,14 @@ void pointCloudCallback(const sensor_msgs::PointCloud2::ConstPtr& ros_pc2_in)
         
         if(pose_array_pub_.getNumSubscribers() > 0) 
         {
+            // Get the pose of the cluster.
             const auto pose = ToPose(clusters[cluster_index]);
             pose_array.poses.push_back(pose);
         }
         
         if(marker_array_pub_.getNumSubscribers() > 0) 
         {
+            // Get the marker for the cluster.
             const auto marker = ToMarker(clusters[cluster_index], ros_pc2_in->header, cluster_index);
             marker_array.markers.push_back(marker);
         }
@@ -243,18 +252,21 @@ void pointCloudCallback(const sensor_msgs::PointCloud2::ConstPtr& ros_pc2_in)
     
     if(cluster_array.clusters.size()) 
     {
+        // Publish the clusters.
         cluster_array.header = ros_pc2_in->header;
         cluster_array_pub_.publish(cluster_array);
     }
 
     if(pose_array.poses.size()) 
     {
+        // Publish the poses.
         pose_array.header = ros_pc2_in->header;
         pose_array_pub_.publish(pose_array);
     }
     
     if(marker_array.markers.size()) 
     {
+        // Publish the markers.
         marker_array_pub_.publish(marker_array);
     } 
     
@@ -263,7 +275,9 @@ void pointCloudCallback(const sensor_msgs::PointCloud2::ConstPtr& ros_pc2_in)
     {
         if(++frames>10)
         {
-            ROS_DEBUG_STREAM("[adaptive_clustering_gpu] fps = " << float(frames)/(float(clock()-start_time)/CLOCKS_PER_SEC) << ", timestamp = " << clock()/CLOCKS_PER_SEC);
+            // Output the FPS log.
+            // Using the warn stream due to the output from the PCL-GPU library clogging the output of the standard output.
+            ROS_WARN_STREAM("[adaptive_clustering_gpu] fps = " << float(frames)/(float(clock()-start_time)/CLOCKS_PER_SEC) << ", timestamp = " << clock()/CLOCKS_PER_SEC);
             reset = true;
         }
     }  
@@ -279,7 +293,7 @@ int main(int argc, char **argv) {
   ros::NodeHandle private_nh("~");
   
   /*** Subscribers ***/
-  ros::Subscriber point_cloud_sub = private_nh.subscribe<sensor_msgs::PointCloud2>("input", 10, pointCloudCallback);
+  ros::Subscriber point_cloud_sub = private_nh.subscribe<sensor_msgs::PointCloud2>("input", 1, pointCloudCallback);
 
   /*** Publishers ***/
   cluster_array_pub_ = private_nh.advertise<adaptive_clustering_gpu::ClusterArray>("clusters", 100);
@@ -292,8 +306,6 @@ int main(int argc, char **argv) {
   
   private_nh.param<std::string>("sensor_model", sensor_model, "VLP-16"); // VLP-16, HDL-32E, HDL-64E
   private_nh.param<bool>("print_fps", print_fps_, false);
-  private_nh.param<float>("z_axis_min", z_axis_min_, -0.8);
-  private_nh.param<float>("z_axis_max", z_axis_max_, 2.0);
   private_nh.param<int>("cluster_size_min", cluster_size_min_, 3);
   private_nh.param<int>("cluster_size_max", cluster_size_max_, 2200000);
   
